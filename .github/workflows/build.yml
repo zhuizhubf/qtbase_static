@@ -1,0 +1,187 @@
+name: Smoke build (Static Qt 5.12.7)
+
+on: push
+
+env:
+  BRANCH:     dev
+  BRANCH_REF: refs/heads/dev
+  QT_TAG:     5.12.7
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: GCC Static
+          - name: ubuntu-20.04
+            os: ubuntu-20.04
+            config: debug
+            deps: libgl-dev libglu-dev 'libxcb*-dev' libx11-xcb-dev libxkbcommon-x11-dev libpcre2-dev libz-dev libfreetype6-dev libpng-dev libjpeg-dev libharfbuzz-dev libb2-dev libdouble-conversion-dev
+            tools: ninja-build ccache
+            install_cmd: sudo apt-get -y install
+            configure_flags: -xcb -system-pcre -system-zlib -system-freetype -system-libpng -system-libjpeg -system-harfbuzz -system-libb2 -system-doubleconversion -opengl desktop
+            extra_cmake: -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections"
+
+          - name: ubuntu-20.04
+            os: ubuntu-20.04
+            config: release
+            deps: libgl-dev libglu-dev 'libxcb*-dev' libx11-xcb-dev libxkbcommon-x11-dev libpcre2-dev libz-dev libfreetype6-dev libpng-dev libjpeg-dev libharfbuzz-dev libb2-dev libdouble-conversion-dev
+            tools: ninja-build ccache
+            install_cmd: sudo apt-get -y install
+            configure_flags: -xcb -system-pcre -system-zlib -system-freetype -system-libpng -system-libjpeg -system-harfbuzz -system-libb2 -system-doubleconversion -opengl desktop
+            extra_cmake: -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections"
+
+          # macOS: Clang Static
+          - name: macos-10.15
+            os: macos-10.15
+            config: debug
+            deps: jpeg sqlite libpng pcre2 harfbuzz freetype libb2 double-conversion
+            tools: ninja ccache pkg-config
+            install_cmd: HOMEBREW_NO_INSTALL_CLEANUP=1 brew install
+            configure_flags: -pkg-config -system-sqlite -system-pcre -system-zlib -system-freetype -system-libpng -system-libjpeg -system-harfbuzz -system-libb2 -system-doubleconversion -opengl desktop
+            extra_cmake: -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+
+          - name: macos-10.15
+            os: macos-10.15
+            config: release
+            deps: jpeg sqlite libpng pcre2 harfbuzz freetype libb2 double-conversion
+            tools: ninja ccache pkg-config
+            install_cmd: HOMEBREW_NO_INSTALL_CLEANUP=1 brew install
+            configure_flags: -pkg-config -system-sqlite -system-pcre -system-zlib -system-freetype -system-libpng -system-libjpeg -system-harfbuzz -system-libb2 -system-doubleconversion -opengl desktop
+            extra_cmake: -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+
+          # Windows: MSVC 2019 Static (MT/MTd)
+          - name: windows-2019
+            os: windows-2019
+            config: debug
+            install_cmd: choco install
+            install_cmd_postfix: --yes --no-progress
+            tools: ninja ccache
+            configure_flags: -platform win32-msvc -opengl angle -static -static-runtime -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc
+            # Qt 5 静态编译在 Windows 下强烈建议使用 bundled 第三方库以避免 CRT 冲突
+            qt_third_party: -qt-pcre -qt-zlib -qt-freetype -qt-libpng -qt-libjpeg -qt-harfbuzz -qt-b2 -qt-doubleconversion
+
+          - name: windows-2019
+            os: windows-2019
+            config: release
+            install_cmd: choco install
+            install_cmd_postfix: --yes --no-progress
+            tools: ninja ccache
+            configure_flags: -platform win32-msvc -opengl angle -static -static-runtime -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc
+            qt_third_party: -qt-pcre -qt-zlib -qt-freetype -qt-libpng -qt-libjpeg -qt-harfbuzz -qt-b2 -qt-doubleconversion
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: prepare Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.deps }} ${{ matrix.tools }}
+          # Qt 5.12 对 GCC 10+ 需要降级标准或打补丁，这里用 GCC 9
+          sudo apt-get install -y gcc-9 g++-9
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100
+
+      - name: prepare macOS
+        if: runner.os == 'macOS'
+        run: |
+          ${{ matrix.install_cmd }} ${{ matrix.deps }} ${{ matrix.tools }}
+
+      - name: prepare Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # 移除干扰的 PostgreSQL 路径
+          Remove-Item -Recurse -Force "C:/Program Files/PostgreSQL/" -ErrorAction SilentlyContinue
+          choco install ccache --version 3.7.12 -y
+          ${{ matrix.install_cmd }} ${{ matrix.tools }} ${{ matrix.install_cmd_postfix }}
+
+      - uses: actions/checkout@v2
+        with:
+          repository: qt/qtbase
+          ref: v${{ env.QT_TAG }}
+          path: source
+
+      - name: restore ccache
+        id: ccache
+        uses: actions/cache@v2
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-static-${{ matrix.name }}-${{ matrix.config }}-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-static-${{ matrix.name }}-${{ matrix.config }}-
+            ccache-static-${{ matrix.name }}-
+
+      - name: configure ccache
+        run: |
+          ccache --set-config sloppiness=file_macro,time_macros
+          ccache --set-config cache_dir='${{ runner.temp }}'/ccache
+          ccache --set-config compression=true
+          ccache --set-config max_size=2G
+
+      - name: print versions
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            cl.exe 2>&1 | head -1
+          else
+            g++ --version | head -1
+          fi
+          ninja --version
+          ccache --version | head -1
+
+      - name: configure
+        working-directory: source
+        run: |
+          mkdir -p ../build
+          cd ../build
+          ../source/configure \
+            -opensource \
+            -confirm-license \
+            -ccache \
+            -static \
+            ${{ matrix.configure_flags }} \
+            ${{ matrix.qt_third_party }} \
+            -widgets \
+            -gui \
+            -opengl \
+            -printsupport \
+            -nomake tests \
+            -nomake examples \
+            -nomake tools \
+            -prefix ${{ runner.temp }}/install_static \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            ${{ matrix.extra_cmake }}
+
+      - name: build
+        working-directory: build
+        run: ninja
+
+      - name: install
+        working-directory: build
+        run: ninja install
+
+      - name: ccache stats
+        run: |
+          ccache -s
+          ccache -z
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: qt-5.12.7-static-${{ matrix.name }}-${{ matrix.config }}
+          path: ${{ runner.temp }}/install_static
+          retention-days: 7
+
+      - name: print logs on failure
+        if: ${{ failure() }}
+        run: |
+          echo "==== Config.log ===="
+          cat build/config.log || true
+          echo "==== Top-level build errors ===="
+          find build -name "*.log" -exec tail -n 50 {} \;
